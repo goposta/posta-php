@@ -50,9 +50,15 @@ class PostaClient
      *     headers?: array<string, string>,
      *     list_unsubscribe_url?: string,
      *     list_unsubscribe_post?: bool,
-     *     send_at?: string
+     *     send_at?: string,
+     *     list?: string
      * } $request
-     * @return array{id: string, status: string}
+     *
+     * The optional `list` field auto-adds the recipient to a named subscriber
+     * list (created on first use). Per-list opt-outs are honored — a
+     * suppressed recipient returns with `skipped: true` and no send.
+     *
+     * @return array{id: string, status: string, list_id?: int, subscriber_id?: int, list_created?: bool, member_added?: bool, skipped?: bool, skipped_reason?: string}
      * @throws PostaException
      */
     public function sendEmail(array $request): array
@@ -130,6 +136,59 @@ class PostaClient
     {
         return $this->post('/emails/' . urlencode($emailId) . '/retry', []);
     }
+
+    /**
+     * Add an email to a named subscriber list. The list is created on first
+     * use. Any prior list-scoped opt-out for this (list, email) is cleared.
+     * Idempotent.
+     *
+     * @param string $email Recipient email
+     * @param string $list  List name (created if it doesn't exist)
+     * @param string $name  Optional subscriber display name
+     * @return array{list_id: int, subscriber_id: int, email: string, action: string, list_created?: bool, subscriber_created?: bool, member_added?: bool}
+     * @throws PostaException
+     */
+    public function subscribeToList(string $email, string $list, string $name = ''): array
+    {
+        $body = ['email' => $email, 'list' => $list];
+        if ($name !== '') {
+            $body['name'] = $name;
+        }
+        return $this->post('/subscriber-lists/subscribe', $body);
+    }
+
+    /**
+     * Opt an email out of a specific subscriber list. Idempotent; does not
+     * change the subscriber's global status.
+     *
+     * @param int    $listId List ID
+     * @param string $email  Recipient email address
+     * @param string $reason Optional audit reason (default: "api")
+     * @return array{list_id: int, subscriber_id: int, email: string, action: string}
+     * @throws PostaException
+     */
+    public function unsubscribeFromList(int $listId, string $email, string $reason = ''): array
+    {
+        $body = ['email' => $email];
+        if ($reason !== '') {
+            $body['reason'] = $reason;
+        }
+        return $this->post('/subscriber-lists/' . $listId . '/unsubscribe', $body);
+    }
+
+    /**
+     * Reverse a list-scoped opt-out and re-add (for static lists). Idempotent.
+     *
+     * @param int    $listId List ID
+     * @param string $email  Recipient email address
+     * @return array{list_id: int, subscriber_id: int, email: string, action: string}
+     * @throws PostaException
+     */
+    public function resubscribeToList(int $listId, string $email): array
+    {
+        return $this->post('/subscriber-lists/' . $listId . '/resubscribe', ['email' => $email]);
+    }
+
 
     /**
      * @throws PostaException
