@@ -4,257 +4,364 @@ declare(strict_types=1);
 
 namespace Posta;
 
+use Posta\Resources\Admin;
+use Posta\Resources\Analytics;
+use Posta\Resources\ApiKeys;
+use Posta\Resources\Auth;
+use Posta\Resources\Bounces;
+use Posta\Resources\Campaigns;
+use Posta\Resources\Contacts;
+use Posta\Resources\Domains;
+use Posta\Resources\Emails;
+use Posta\Resources\Forms;
+use Posta\Resources\Inbound;
+use Posta\Resources\Languages;
+use Posta\Resources\MessageFilters;
+use Posta\Resources\Messages;
+use Posta\Resources\SmtpCredentials;
+use Posta\Resources\SmtpServers;
+use Posta\Resources\Stylesheets;
+use Posta\Resources\SubscriberLists;
+use Posta\Resources\Subscribers;
+use Posta\Resources\Suppressions;
+use Posta\Resources\System;
+use Posta\Resources\Templates;
+use Posta\Resources\UnsubscribeLists;
+use Posta\Resources\Users;
+use Posta\Resources\Webhooks;
+use Posta\Resources\Workspaces;
+
 /**
- * Posta PHP client for the public email API.
+ * Client for the Posta email platform.
  *
- * Supports sending emails, template emails, batch emails,
- * and checking email delivery status.
+ * Its public properties group the API by resource. Every method returns the
+ * decoded `data` from the API envelope and throws {@see PostaException} on a
+ * non-2xx response.
+ *
+ * ## Credentials
+ *
+ * Most machine-facing endpoints take an API key. Account-level endpoints
+ * (`/users/me/*`) and the platform admin surface accept only a user session
+ * token, which {@see PostaClient::withToken()} supplies.
+ *
+ * ## Workspaces
+ *
+ * Workspace-scoped endpoints resolve the active workspace from the
+ * `X-Posta-Workspace-Id` header. A workspace-bound API key carries its
+ * workspace already; an account-wide key or a user session must name one with
+ * $workspaceId.
  *
  * Usage:
- *   $client = new PostaClient('https://posta.example.com', 'your-api-key');
- *   $response = $client->sendEmail([
- *       'from'    => 'sender@example.com',
- *       'to'      => ['recipient@example.com'],
- *       'subject' => 'Hello',
- *       'html'    => '<h1>Hello World</h1>',
+ *   $posta = new PostaClient('https://posta.example.com', 'psk_your_api_key');
+ *   $resp = $posta->emails->send([
+ *       'from'    => 'Acme <hello@example.com>',
+ *       'to'      => ['user@example.com'],
+ *       'subject' => 'Hello from Posta',
+ *       'html'    => '<h1>Hello!</h1>',
  *   ]);
  */
 class PostaClient
 {
-    private string $baseUrl;
-    private string $apiKey;
-    private int $timeout;
+    private Http $http;
+
+    /** Sends mail and reads the resulting delivery records. */
+    public Emails $emails;
+    /** Reads recorded bounces and complaints. */
+    public Bounces $bounces;
+    /** Manages the workspace suppression list. */
+    public Suppressions $suppressions;
+    /** Registers webhook endpoints and reads delivery attempts. */
+    public Webhooks $webhooks;
+    /** Manages templates, versions, and localizations. */
+    public Templates $templates;
+    /** Manages the workspace's template languages. */
+    public Languages $languages;
+    /** Manages reusable CSS for templates. */
+    public Stylesheets $stylesheets;
+    /** Manages sending domains and their DNS verification. */
+    public Domains $domains;
+    /** Manages the SMTP servers Posta delivers through. */
+    public SmtpServers $smtpServers;
+    /** Manages credentials for the SMTP relay listener. */
+    public SmtpCredentials $smtpCredentials;
+    /** Manages subscriber records and bulk imports. */
+    public Subscribers $subscribers;
+    /** Manages lists, their members, and opt-outs. */
+    public SubscriberLists $subscriberLists;
+    /** Manages the lists behind List-Unsubscribe headers. */
+    public UnsubscribeLists $unsubscribeLists;
+    /** Reads the derived contact view of everyone mailed. */
+    public Contacts $contacts;
+    /** Manages bulk campaigns and their lifecycle. */
+    public Campaigns $campaigns;
+    /** Reads delivery and engagement analytics. */
+    public Analytics $analytics;
+    /** Manages web form endpoints and their embed snippets. */
+    public Forms $forms;
+    /** Reads and triages web form submissions. */
+    public Messages $messages;
+    /** Manages the spam filters applied to submissions. */
+    public MessageFilters $messageFilters;
+    /** Reads inbound email received by Posta. */
+    public Inbound $inbound;
+    /** Manages the workspace's API keys. */
+    public ApiKeys $apiKeys;
+    /** Manages workspaces, members, invitations, and settings. */
+    public Workspaces $workspaces;
+    /** Manages the signed-in account (session credential only). */
+    public Users $users;
+    /** Login, registration, and password recovery. */
+    public Auth $auth;
+    /** Platform administration (admin session only). */
+    public Admin $admin;
+    /** Build and health information. */
+    public System $system;
 
     /**
-     * @param string $baseUrl Base URL of the Posta instance (e.g. https://posta.example.com)
-     * @param string $apiKey  API key for authentication
-     * @param int    $timeout HTTP timeout in seconds (default: 30)
+     * @param string                $baseUrl     Base URL of the Posta instance, e.g. https://posta.example.com
+     * @param string                $apiKey      An API key (psk_…), or a session token via withToken()
+     * @param int                   $timeout     HTTP timeout in seconds (default: 30)
+     * @param int|null              $workspaceId Active workspace for workspace-scoped endpoints
+     * @param array<string, string> $headers     Extra headers sent with every request
+     * @param string|null           $userAgent   Overrides the User-Agent header
      */
-    public function __construct(string $baseUrl, string $apiKey, int $timeout = 30)
-    {
-        $this->baseUrl = rtrim($baseUrl, '/') . '/api/v1';
-        $this->apiKey = $apiKey;
-        $this->timeout = $timeout;
+    public function __construct(
+        string $baseUrl,
+        string $apiKey,
+        int $timeout = 30,
+        ?int $workspaceId = null,
+        array $headers = [],
+        ?string $userAgent = null
+    ) {
+        $this->http = new Http($baseUrl, $apiKey, $timeout, $workspaceId, $headers, $userAgent);
+
+        $this->emails = new Emails($this->http);
+        $this->bounces = new Bounces($this->http);
+        $this->suppressions = new Suppressions($this->http);
+        $this->webhooks = new Webhooks($this->http);
+        $this->templates = new Templates($this->http);
+        $this->languages = new Languages($this->http);
+        $this->stylesheets = new Stylesheets($this->http);
+        $this->domains = new Domains($this->http);
+        $this->smtpServers = new SmtpServers($this->http);
+        $this->smtpCredentials = new SmtpCredentials($this->http);
+        $this->subscribers = new Subscribers($this->http);
+        $this->subscriberLists = new SubscriberLists($this->http);
+        $this->unsubscribeLists = new UnsubscribeLists($this->http);
+        $this->contacts = new Contacts($this->http);
+        $this->campaigns = new Campaigns($this->http);
+        $this->analytics = new Analytics($this->http);
+        $this->forms = new Forms($this->http);
+        $this->messages = new Messages($this->http);
+        $this->messageFilters = new MessageFilters($this->http);
+        $this->inbound = new Inbound($this->http);
+        $this->apiKeys = new ApiKeys($this->http);
+        $this->workspaces = new Workspaces($this->http);
+        $this->users = new Users($this->http);
+        $this->auth = new Auth($this->http);
+        $this->admin = new Admin($this->http);
+        $this->system = new System($this->http);
     }
 
     /**
-     * Send a single email.
+     * Build a client authenticated with a user session token (JWT).
      *
-     * @param array{
-     *     from: string,
-     *     to: string[],
-     *     subject: string,
-     *     html?: string,
-     *     text?: string,
-     *     attachments?: array<array{filename: string, content: string, content_type: string}>,
-     *     headers?: array<string, string>,
-     *     list_unsubscribe_url?: string,
-     *     list_unsubscribe_post?: bool,
-     *     send_at?: string,
-     *     list?: string
-     * } $request
+     * As returned by {@see Auth::login()}. Account-level endpoints under
+     * /users/me and the platform admin surface accept only this credential.
      *
-     * The optional `list` field auto-adds the recipient to a named subscriber
-     * list (created on first use). Per-list opt-outs are honored — a
-     * suppressed recipient returns with `skipped: true` and no send.
-     *
-     * @return array{id: string, status: string, list_id?: int, subscriber_id?: int, list_created?: bool, member_added?: bool, skipped?: bool, skipped_reason?: string}
+     * @param array<string, string> $headers
+     */
+    public static function withToken(
+        string $baseUrl,
+        string $token,
+        int $timeout = 30,
+        ?int $workspaceId = null,
+        array $headers = [],
+        ?string $userAgent = null
+    ): self {
+        return new self($baseUrl, $token, $timeout, $workspaceId, $headers, $userAgent);
+    }
+
+    // ── Compatibility ────────────────────────────────────────────────────
+    //
+    // Kept for source compatibility with earlier releases, which exposed the
+    // send surface directly on the client. New code should use the resource
+    // properties, which cover the whole API rather than this subset.
+
+    /**
+     * @deprecated Use $client->emails->send().
+     * @param array<string, mixed> $request
+     * @return array<string, mixed>
      * @throws PostaException
      */
-    public function sendEmail(array $request): array
+    public function sendEmail(array $request, bool $dryRun = false): array
     {
-        return $this->post('/emails/send', $request);
+        return $this->emails->send($request, $dryRun);
     }
 
     /**
-     * Send an email using a template.
-     *
-     * Provide either template_id or template (name). template_id is preferred (primary key lookup);
-     * template is a fallback when the ID is not known.
-     *
-     * @param array{
-     *     template_id?: int,    Template numeric ID (preferred)
-     *     template?: string,    Template name (fallback when template_id is not provided)
-     *     to: string[],
-     *     language?: string,
-     *     from?: string,
-     *     template_data?: array<string, mixed>,
-     *     attachments?: array<array{filename: string, content: string, content_type: string}>
-     * } $request
-     * @return array{id: string, status: string}
+     * @deprecated Use $client->emails->sendTemplate().
+     * @param array<string, mixed> $request
+     * @return array<string, mixed>
      * @throws PostaException
      */
-    public function sendTemplateEmail(array $request): array
+    public function sendTemplateEmail(array $request, bool $dryRun = false): array
     {
-        return $this->post('/emails/send-template', $request);
+        return $this->emails->sendTemplate($request, $dryRun);
     }
 
     /**
-     * Send batch emails using a template.
-     *
-     * Provide either template_id or template (name). template_id is preferred (primary key lookup);
-     * template is a fallback when the ID is not known.
-     *
-     * @param array{
-     *     template_id?: int,    Template numeric ID (preferred)
-     *     template?: string,    Template name (fallback when template_id is not provided)
-     *     language?: string,
-     *     from?: string,
-     *     recipients: array<array{email: string, language?: string, template_data?: array<string, mixed>}>
-     * } $request
-     * @return array{total: int, sent: int, failed: int, skipped: int, results: array}
+     * @deprecated Use $client->emails->sendBatch().
+     * @param array<string, mixed> $request
+     * @return array<string, mixed>
      * @throws PostaException
      */
-    public function sendBatch(array $request): array
+    public function sendBatch(array $request, bool $dryRun = false): array
     {
-        return $this->post('/emails/batch', $request);
+        return $this->emails->sendBatch($request, $dryRun);
     }
 
     /**
-     * Get the delivery status of an email.
-     *
-     * @param string $emailId Email UUID
-     * @return array{id: string, status: string, error_message?: string, retry_count: int, created_at: string, sent_at?: string}
+     * @deprecated Use $client->emails->preview().
+     * @param array<string, mixed> $request
+     * @return array<string, mixed>
+     * @throws PostaException
+     */
+    public function previewTemplate(array $request): array
+    {
+        return $this->emails->preview($request);
+    }
+
+    /**
+     * @deprecated Use $client->emails->verify().
+     * @return array<string, mixed>
+     * @throws PostaException
+     */
+    public function verifyEmail(string $email, bool $fresh = false): array
+    {
+        return $this->emails->verify($email, $fresh);
+    }
+
+    /**
+     * @deprecated Use $client->emails->status().
+     * @return array<string, mixed>
      * @throws PostaException
      */
     public function getEmailStatus(string $emailId): array
     {
-        return $this->get('/emails/' . urlencode($emailId) . '/status');
+        return $this->emails->status($emailId);
     }
 
     /**
-     * Retry a failed email delivery.
-     *
-     * Only emails with status "failed" can be retried, subject to the retry limit
-     * configured on the SMTP server.
-     *
-     * @param string $emailId Email UUID
-     * @return array{id: string, status: string}
+     * @deprecated Use $client->emails->retry().
+     * @return array<string, mixed>
      * @throws PostaException
      */
     public function retryEmail(string $emailId): array
     {
-        return $this->post('/emails/' . urlencode($emailId) . '/retry', []);
+        return $this->emails->retry($emailId);
     }
 
     /**
-     * Add an email to a named subscriber list. The list is created on first
-     * use. Any prior list-scoped opt-out for this (list, email) is cleared.
-     * Idempotent.
-     *
-     * @param string $email Recipient email
-     * @param string $list  List name (created if it doesn't exist)
-     * @param string $name  Optional subscriber display name
-     * @return array{list_id: int, subscriber_id: int, email: string, action: string, list_created?: bool, subscriber_created?: bool, member_added?: bool}
+     * @deprecated Use $client->emails->list(), which can also filter and sort.
+     * @return array<string, mixed>
+     * @throws PostaException
+     */
+    public function listEmails(int $page = 0, int $size = 20): array
+    {
+        return $this->emails->list(['page' => $page, 'size' => $size]);
+    }
+
+    /**
+     * @deprecated Use $client->emails->get().
+     * @return array<string, mixed>
+     * @throws PostaException
+     */
+    public function getEmail(string $id): array
+    {
+        return $this->emails->get($id);
+    }
+
+    /**
+     * @deprecated Use $client->bounces->list().
+     * @return array<string, mixed>
+     * @throws PostaException
+     */
+    public function listBounces(int $page = 0, int $size = 20): array
+    {
+        return $this->bounces->list(['page' => $page, 'size' => $size]);
+    }
+
+    /**
+     * @deprecated Use $client->webhooks->list().
+     * @return array<string, mixed>
+     * @throws PostaException
+     */
+    public function listWebhooks(int $page = 0, int $size = 20): array
+    {
+        return $this->webhooks->list(['page' => $page, 'size' => $size]);
+    }
+
+    /**
+     * @deprecated Use $client->webhooks->create().
+     * @param string[] $events
+     * @param string[] $filters
+     * @return array<string, mixed>
+     * @throws PostaException
+     */
+    public function createWebhook(string $url, array $events, array $filters = []): array
+    {
+        return $this->webhooks->create($url, $events, $filters);
+    }
+
+    /**
+     * @deprecated Use $client->webhooks->delete().
+     * @return array<string, mixed>
+     * @throws PostaException
+     */
+    public function deleteWebhook(int $id): array
+    {
+        $this->webhooks->delete($id);
+        return [];
+    }
+
+    /**
+     * @deprecated Use $client->webhooks->listDeliveries().
+     * @return array<string, mixed>
+     * @throws PostaException
+     */
+    public function listWebhookDeliveries(int $page = 0, int $size = 20): array
+    {
+        return $this->webhooks->listDeliveries(['page' => $page, 'size' => $size]);
+    }
+
+    /**
+     * @deprecated Use $client->subscriberLists->subscribe().
+     * @return array<string, mixed>
      * @throws PostaException
      */
     public function subscribeToList(string $email, string $list, string $name = ''): array
     {
-        $body = ['email' => $email, 'list' => $list];
-        if ($name !== '') {
-            $body['name'] = $name;
-        }
-        return $this->post('/subscriber-lists/subscribe', $body);
+        return $this->subscriberLists->subscribe($email, $list, $name);
     }
 
     /**
-     * Opt an email out of a specific subscriber list. Idempotent; does not
-     * change the subscriber's global status.
-     *
-     * @param int    $listId List ID
-     * @param string $email  Recipient email address
-     * @param string $reason Optional audit reason (default: "api")
-     * @return array{list_id: int, subscriber_id: int, email: string, action: string}
+     * @deprecated Use $client->subscriberLists->unsubscribe().
+     * @return array<string, mixed>
      * @throws PostaException
      */
     public function unsubscribeFromList(int $listId, string $email, string $reason = ''): array
     {
-        $body = ['email' => $email];
-        if ($reason !== '') {
-            $body['reason'] = $reason;
-        }
-        return $this->post('/subscriber-lists/' . $listId . '/unsubscribe', $body);
+        return $this->subscriberLists->unsubscribe($listId, $email, $reason);
     }
 
     /**
-     * Reverse a list-scoped opt-out and re-add (for static lists). Idempotent.
-     *
-     * @param int    $listId List ID
-     * @param string $email  Recipient email address
-     * @return array{list_id: int, subscriber_id: int, email: string, action: string}
+     * @deprecated Use $client->subscriberLists->resubscribe().
+     * @return array<string, mixed>
      * @throws PostaException
      */
     public function resubscribeToList(int $listId, string $email): array
     {
-        return $this->post('/subscriber-lists/' . $listId . '/resubscribe', ['email' => $email]);
-    }
-
-
-    /**
-     * @throws PostaException
-     */
-    private function post(string $path, array $body): array
-    {
-        return $this->request('POST', $path, $body);
-    }
-
-    /**
-     * @throws PostaException
-     */
-    private function get(string $path): array
-    {
-        return $this->request('GET', $path);
-    }
-
-    /**
-     * @throws PostaException
-     */
-    private function request(string $method, string $path, ?array $body = null): array
-    {
-        $url = $this->baseUrl . $path;
-
-        $headers = [
-            'Authorization: Bearer ' . $this->apiKey,
-            'Content-Type: application/json',
-            'Accept: application/json',
-        ];
-
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL            => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => $this->timeout,
-            CURLOPT_HTTPHEADER     => $headers,
-            CURLOPT_CUSTOMREQUEST  => $method,
-        ]);
-
-        if ($body !== null) {
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
-        }
-
-        $responseBody = curl_exec($ch);
-        $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlError = curl_error($ch);
-        curl_close($ch);
-
-        if ($responseBody === false) {
-            throw new PostaException('HTTP request failed: ' . $curlError, 0);
-        }
-
-        $decoded = json_decode((string) $responseBody, true);
-
-        if ($statusCode < 200 || $statusCode >= 300) {
-            $message = 'Unexpected status ' . $statusCode;
-            if (is_array($decoded) && isset($decoded['error']['message'])) {
-                $message = $decoded['error']['message'];
-            }
-            throw new PostaException($message, $statusCode, $decoded['error'] ?? null);
-        }
-
-        if (!is_array($decoded) || !($decoded['success'] ?? false)) {
-            throw new PostaException('Invalid response from server', $statusCode);
-        }
-
-        return $decoded['data'] ?? [];
+        return $this->subscriberLists->resubscribe($listId, $email);
     }
 }
