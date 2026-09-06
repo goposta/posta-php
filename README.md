@@ -1,99 +1,275 @@
 # Posta PHP Client
 
-A lightweight PHP client for the [Posta](https://github.com/goposta/posta) email API.
+Official PHP client for the [Posta](https://github.com/goposta/posta) email
+platform.
 
-## Requirements
+It covers the whole Posta API: transactional and templated sending, batch
+sends, address verification, templates with versions and localizations,
+campaigns, subscribers and lists, suppressions and bounces, domains, SMTP
+servers and relay credentials, webhooks, web forms and the messages they
+collect, inbound email, workspace administration, and the platform admin
+surface.
 
-- PHP 8.1+
-- `ext-curl`
-- `ext-json`
+Uses `ext-curl` and `ext-json` only — no Composer dependencies.
 
 ## Installation
-
-### Composer
 
 ```bash
 composer require goposta/posta-php
 ```
 
-### Manual
+**Requires:** PHP 8.1+
 
-Copy `src/PostaClient.php` and `src/PostaException.php` into your project and include them.
-
-## Usage
+## Quick start
 
 ```php
 use Posta\PostaClient;
 
-$client = new PostaClient('https://posta.example.com', 'your-api-key');
-```
+$posta = new PostaClient('https://posta.example.com', 'psk_your_api_key');
 
-### Send Email
-
-```php
-$response = $client->sendEmail([
-    'from'    => 'sender@example.com',
-    'to'      => ['recipient@example.com'],
-    'subject' => 'Hello',
-    'html'    => '<h1>Hello World</h1>',
+$resp = $posta->emails->send([
+    'from'    => 'Acme <hello@example.com>',
+    'to'      => ['user@example.com'],
+    'subject' => 'Hello from Posta',
+    'html'    => '<h1>Hello!</h1>',
 ]);
-// $response = ['id' => '...', 'status' => 'queued']
+
+echo "sent: id={$resp['id']} status={$resp['status']}\n";
 ```
 
-### Send Template Email
+## Credentials
+
+Most machine-facing endpoints take an API key:
 
 ```php
-$response = $client->sendTemplateEmail([
+$posta = new PostaClient('https://posta.example.com', 'psk_...');
+```
+
+Account-level endpoints (`/users/me/*`) and the platform admin surface accept
+only a user session token — an API key is never a valid credential there:
+
+```php
+$auth = (new PostaClient($baseUrl, ''))->auth->login('admin@example.com', $password);
+$admin = PostaClient::withToken($baseUrl, $auth['token']);
+```
+
+### Workspaces
+
+Workspace-scoped endpoints resolve the active workspace from the
+`X-Posta-Workspace-Id` header. A workspace-bound API key already carries its
+workspace; an account-wide key or a user session must name one:
+
+```php
+$posta = new PostaClient($baseUrl, $apiKey, timeout: 30, workspaceId: 42);
+```
+
+### API key scopes
+
+A key reaches only what its scopes allow. `Scope::SEND` covers the public send
+API; `READ` and `WRITE` cover reading and mutating workspace resources;
+`WEBHOOKS` covers webhook management; `ADMIN` covers tenant administration
+(keys, members, settings); `ALL` grants everything.
+
+A 403 from an endpoint you expect to work usually means a missing scope —
+`$err->isForbidden()` distinguishes it.
+
+## Client options
+
+```php
+$posta = new PostaClient(
+    'https://posta.example.com',
+    'psk_...',
+    timeout: 15,                                    // seconds, default 30
+    workspaceId: 42,
+    headers: ['X-Request-Source' => 'batch-job'],
+    userAgent: 'my-app/1.0',
+);
+```
+
+## Resources
+
+| Property | Covers |
+|---|---|
+| `emails` | send, sendTemplate, sendBatch, preview, verify, status, retry, list, get |
+| `bounces` | list, record |
+| `suppressions` | list, add, remove |
+| `webhooks` | list, create, delete, deliveries |
+| `templates` | CRUD, versions, localizations, preview, sendTest, import/export |
+| `languages`, `stylesheets` | CRUD |
+| `domains` | add, list, get, verify, delete |
+| `smtpServers`, `smtpCredentials` | CRUD, test, revoke |
+| `subscribers` | CRUD, JSON and CSV bulk import |
+| `subscriberLists` | CRUD, members, segments, subscribe/unsubscribe/resubscribe |
+| `unsubscribeLists`, `contacts` | CRUD / read |
+| `campaigns` | CRUD, send, pause, resume, cancel, duplicate, messages, analytics |
+| `analytics` | emails, dashboard, providers, dashboardStats |
+| `forms` | CRUD, rotateKey, snippet, nonce, public submit |
+| `messages`, `messageFilters` | list, triage, reply, attachments; filter CRUD and dry-run |
+| `inbound` | list, get, retry, raw `.eml`, attachments |
+| `apiKeys` | create, list, get, revoke, delete |
+| `workspaces` | CRUD, members, invitations, settings, SSO, audit log, export/import, GDPR |
+| `users` | profile, password, 2FA, sessions, settings, notifications (session credential) |
+| `auth` | login, register, password reset, email verification, SSO discovery |
+| `admin` | users, plans, shared servers, domains, settings, announcements, events, metrics |
+| `system` | info, healthz, readyz |
+
+Every method returns the decoded `data` from the API envelope; list methods
+return the whole envelope, so `pageable` is reachable alongside the rows.
+
+## Examples
+
+### Templated and batch sends
+
+```php
+$posta->emails->sendTemplate([
     'template'      => 'welcome',
     'to'            => ['user@example.com'],
-    'template_data' => ['name' => 'John'],
+    'template_data' => ['name' => 'Ada'],
 ]);
-```
 
-### Send Batch Emails
-
-```php
-$response = $client->sendBatch([
-    'template'   => 'newsletter',
+$batch = $posta->emails->sendBatch([
+    'template'   => 'welcome',
     'recipients' => [
-        ['email' => 'alice@example.com', 'template_data' => ['name' => 'Alice']],
-        ['email' => 'bob@example.com',   'template_data' => ['name' => 'Bob']],
+        ['email' => 'a@example.com', 'template_data' => ['name' => 'Ada']],
+        ['email' => 'b@example.com', 'template_data' => ['name' => 'Grace']],
     ],
 ]);
-// $response = ['total' => 2, 'sent' => 2, 'failed' => 0, ...]
+echo "{$batch['sent']} sent, {$batch['failed']} failed\n";
 ```
 
-### Get Email Status
+Validate without sending by passing `true` as the second argument:
 
 ```php
-$status = $client->getEmailStatus('email-uuid');
-// $status = ['id' => '...', 'status' => 'sent', 'retry_count' => 0, ...]
+$report = $posta->emails->send($request, true);
 ```
 
-### Error Handling
+### One-click unsubscribe
+
+Reference a Posta-managed unsubscribe list and Posta mints the signed one-click
+URL, recording opt-outs against that list alone:
+
+```php
+$posta->emails->send([
+    'from'        => 'news@example.com',
+    'to'          => ['user@example.com'],
+    'subject'     => 'This week',
+    'html'        => '<p>…</p>',
+    'unsubscribe' => ['list_id' => 7],
+]);
+```
+
+### Templates, versions, localizations
+
+```php
+$tpl = $posta->templates->create(['name' => 'welcome', 'default_language' => 'en']);
+$ver = $posta->templates->createVersion($tpl['id']);
+$posta->templates->createLocalization($tpl['id'], $ver['id'], [
+    'language'         => 'en',
+    'subject_template' => 'Welcome, {{.name}}',
+    'html_template'    => '<h1>Welcome, {{.name}}</h1>',
+]);
+$posta->templates->activateVersion($tpl['id'], $ver['id']);
+```
+
+### Campaigns
+
+```php
+$camp = $posta->campaigns->create([
+    'name'        => 'Launch',
+    'subject'     => "We're live",
+    'from_email'  => 'news@example.com',
+    'list_id'     => $listId,
+    'template_id' => $tpl['id'],
+]);
+$posta->campaigns->send($camp['id']);
+
+$stats = $posta->campaigns->analytics($camp['id']);
+echo "open rate {$stats['analytics']['open_rate']}%\n";
+```
+
+### Paging
+
+`page` is zero-based; omitting `size` lets the server apply its default.
+
+```php
+$page = $posta->emails->list(['page' => 0, 'size' => 50, 'sort' => '-created_at']);
+echo $page['pageable']['total_elements'] . "\n";
+foreach ($page['data'] as $email) {
+    echo $email['subject'] . "\n";
+}
+```
+
+### Verifying webhooks
+
+Posta signs each delivery with HMAC-SHA256 over the raw body, in the
+`X-Posta-Signature` header as `sha256=<hex>`. Verify against the exact bytes
+received — re-serializing the JSON changes them:
+
+```php
+use Posta\WebhookEvent;
+
+$raw = file_get_contents('php://input');
+$sig = $_SERVER['HTTP_X_POSTA_SIGNATURE'] ?? null;
+
+if (!WebhookEvent::verifySignature($raw, $sig, $secret)) {
+    http_response_code(401);
+    exit;
+}
+
+$event = json_decode($raw, true);
+switch ($event['event']) {
+    case WebhookEvent::EMAIL_SENT:
+        error_log("delivered: {$event['email_id']}");
+        break;
+    case WebhookEvent::EMAIL_FAILED:
+        error_log("failed: {$event['email_id']}");
+        break;
+}
+http_response_code(200);
+```
+
+Event constants live on `Posta\WebhookEvent`: `EMAIL_SENT`, `EMAIL_FAILED`,
+`EMAIL_INBOUND`, `EMAIL_UNSUBSCRIBED`, `EMAIL_COMPLAINED`, `CAMPAIGN_STARTED`,
+`CAMPAIGN_COMPLETED`, `MESSAGE_RECEIVED`, `MESSAGE_SPAM`.
+
+### Web forms
+
+```php
+$form = $posta->forms->create([
+    'name'            => 'Contact',
+    'allowed_origins' => ['https://example.com'],
+    'strict_origin'   => true,
+    'notify_emails'   => ['team@example.com'],
+]);
+
+$snippet = $posta->forms->snippet($form['id']);
+echo $snippet['html'];
+
+$inbox = $posta->messages->list(['state' => 'new']);
+```
+
+## Errors
+
+Non-2xx responses throw `PostaException`, carrying the status and the decoded
+error envelope:
 
 ```php
 use Posta\PostaException;
 
 try {
-    $client->sendEmail([...]);
-} catch (PostaException $e) {
-    echo $e->getStatusCode(); // HTTP status code
-    echo $e->getMessage();    // Error message
-    $info = $e->getErrorInfo(); // Parsed error details (nullable)
+    $posta->emails->send($request);
+} catch (PostaException $err) {
+    error_log("posta {$err->getStatusCode()}: " . ($err->getErrorInfo()['message'] ?? ''));
+    if ($err->isRateLimited()) {
+        retryLater();
+    }
 }
 ```
 
-## Contributing
-
-Contributions are welcome! Please open an issue to discuss proposed changes before submitting a pull request.
+Methods cover the common cases: `isNotFound()`, `isUnauthorized()`,
+`isForbidden()`, `isRateLimited()`, plus `getErrorCode()` for the API's
+structured error code.
 
 ## License
 
-This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
-
----
-
-## Copyright
-
-Copyright © 2026 Jonas Kaninda
+Apache-2.0
